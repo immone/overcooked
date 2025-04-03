@@ -23,12 +23,13 @@ class Player:
 
     REWARD_LIST = {
         "subtask finished": 10,
+        "metatask failed": -5,
         "correct delivery": 200,
         "wrong delivery": -5,
         "step penalty": -0.1
     }
 
-    def __init__(self, env_id, grid_dim, task, map_type, n_agent, obs_radius, mode, debug, agent='human'):
+    def __init__(self, grid_dim, task, map_type, mode, debug, agent='human'):
         self.env_params = {
             'grid_dim': grid_dim,
             'task': TASKLIST[task],

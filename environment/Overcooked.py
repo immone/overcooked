@@ -310,6 +310,13 @@ class Overcooked_multi(MultiAgentEnv):
         self.itemDic = {name: [] for name in ITEMNAME if name != "space" and name != "counter"}
         agent_idx = 0
 
+        self.knife = []
+        self.delivery = []
+        self.tomato = []
+        self.lettuce = []
+        self.onion = []
+        self.plate = []
+
         for x in range(self.xlen):
             for y in range(self.ylen):
                 item_type = ITEMNAME[self.map[x][y]]
@@ -317,17 +324,29 @@ class Overcooked_multi(MultiAgentEnv):
                     self.itemDic[item_type].append(Agent(x, y, color=AGENTCOLOR[agent_idx]))
                     agent_idx += 1
                 elif item_type == "knife":
-                    self.itemDic[item_type].append(Knife(x, y))
+                    new_knife = Knife(x, y)
+                    self.itemDic[item_type].append(new_knife)
+                    self.knife.append(new_knife)
                 elif item_type == "delivery":
-                    self.itemDic[item_type].append(Delivery(x, y))
+                    new_delivery = Delivery(x, y)
+                    self.itemDic[item_type].append(new_delivery)
+                    self.delivery.append(new_delivery)
                 elif item_type == "tomato":
-                    self.itemDic[item_type].append(Tomato(x, y))
+                    new_tomato = Tomato(x, y)
+                    self.itemDic[item_type].append(new_tomato)
+                    self.tomato.append(new_tomato)
                 elif item_type == "lettuce":
-                    self.itemDic[item_type].append(Lettuce(x, y))
+                    new_lettuce = Lettuce(x, y)
+                    self.itemDic[item_type].append(new_lettuce)
+                    self.lettuce.append(new_lettuce)
                 elif item_type == "onion":
-                    self.itemDic[item_type].append(Onion(x, y))
+                    new_onion = Onion(x, y)
+                    self.itemDic[item_type].append(new_onion)
+                    self.onion.append(new_onion)
                 elif item_type == "plate":
-                    self.itemDic[item_type].append(Plate(x, y))
+                    new_plate = Plate(x, y)
+                    self.itemDic[item_type].append(new_plate)
+                    self.plate.append(new_plate)
 
         self.itemList = [item for sublist in self.itemDic.values() for item in sublist]
         self.agent = self.itemDic["agent"]
@@ -763,13 +782,13 @@ class Overcooked_multi(MultiAgentEnv):
                                 # If the food is not chopped, chop it once
                                 else:
                                     knife.holding.chop()
-                                    self.reward += self.rewardList["goodtask finished"]
+                                    self.reward += self.rewardList["subtask finished"]
                                     # If the food is chopped after chopping, check if it is part of the current task
                                     if knife.holding.chopped:
                                         for task in self.task:
                                             if knife.holding.rawName in task:
                                                 # Reward for completing a mini task
-                                                self.reward += self.rewardList["minitask finished"]
+                                                self.reward += self.rewardList["subtask finished"]
                     # put down
                     # If the agent is currently holding something
                     elif agent.holding:
@@ -810,7 +829,7 @@ class Overcooked_multi(MultiAgentEnv):
                                         self.reward += self.rewardList["metatask failed"]
                                     else:
                                         # Reward for placing unchopped food on the knife
-                                        self.reward += self.rewardList["goodtask finished"]
+                                        self.reward += self.rewardList["subtask finished"]
                                 else:
                                     self.reward += self.rewardList["metatask failed"]
                             # If the knife is holding food and the agent is holding a plate, place the food on the plate

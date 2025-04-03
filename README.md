@@ -14,10 +14,20 @@ Robots need to learn cooperating with each other to prepare a certain dish accor
 ## Installation
 
 - To install all the dependencies:
-  ```
-  conda create --name <env> --file <this file>
-  ```
-
+```
+pip install -U "ray[data,train,tune,serve]"
+pip install pandas
+pip install numpy
+pip install matplotlib
+pip install gymnasium
+pip install pygame
+pip install scipy
+pip install tensorboard
+pip install dm_tree
+pip install torch
+pip install pillow
+pip install lz4
+```
 ## Code structure
 - `play.py`: a toy for mutual playing the env.
 - `train_rllib.py`: training a marl model with rllib.

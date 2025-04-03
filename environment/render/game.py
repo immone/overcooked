@@ -1,4 +1,6 @@
 import os
+import sys
+from pygame.locals import *
 
 import numpy as np
 from .utils import *
@@ -128,6 +130,12 @@ class Game:
                                 else:
                                     self.draw(agent.holding.name, self.holding_size, self.holding_location((y, x)))
         pygame.display.flip()
+        pygame.display.update()
+
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                pygame.quit()
+                sys.exit()
         pygame.display.update()
 
         img_int = pygame.PixelArray(self.screen)
