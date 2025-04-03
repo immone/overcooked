@@ -5,6 +5,7 @@ from .items import Tomato, Lettuce, Onion, Plate, Knife, Delivery, Agent, Food
 import copy
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from collections import Counter
+import random 
 
 DIRECTION = [(0, 1), (1, 0), (0, -1), (-1, 0)]
 ITEMNAME = ["space", "counter", "agent", "tomato", "lettuce", "plate", "knife", "delivery", "onion"]
@@ -659,6 +660,8 @@ class Overcooked_multi(MultiAgentEnv):
 
         self._initObs()
 
+        # sample random human reward multiplier once per episode
+        self.human_multiplier = random.choice([1, -1])
         return self._get_obs(), {}
     
     def step(self, action):
@@ -916,11 +919,21 @@ class Overcooked_multi(MultiAgentEnv):
                 if not agent.moved:
                     all_action_done = False
 
+       # terminateds = {"__all__": done or self.step_count >= 80}
+       # rewards = {agent: self.reward for agent in self.agents}
+       # infos = {agent: info for agent in self.agents}
+
+       # truncated =  False
+
+       # return self._get_obs(), rewards, terminateds, {'__all__': truncated}, infos
         terminateds = {"__all__": done or self.step_count >= 80}
         rewards = {agent: self.reward for agent in self.agents}
-        infos = {agent: info for agent in self.agents}
 
-        truncated =  False
+        # Use the human multiplier sampled during reset
+        rewards["human"] *= self.human_multiplier
+
+        infos = {agent: info for agent in self.agents}
+        truncated = False
 
         return self._get_obs(), rewards, terminateds, {'__all__': truncated}, infos
 

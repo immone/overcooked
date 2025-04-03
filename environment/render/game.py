@@ -86,14 +86,14 @@ class Game:
                                 if k.holding.name == "plate":
                                     if k.holding.containing:
                                         self.draw(k.holding.containedName, self.container_size, self.container_location((y, x)))
-                elif self.env.map[x][y] == ITEMIDX["tomato"]:
+                elif self.env.map[x][y] == ITEMIDX["Tomato"]:
                     fill = pygame.Rect(sl[0], sl[1], self.scale, self.scale)
                     pygame.draw.rect(self.screen, Color.COUNTER, fill)
                     pygame.draw.rect(self.screen, Color.COUNTER_BORDER, fill, 1)
                     for t in self.env.tomato:
                         if t.x == x and t.y == y:
                             self.draw(t.name, self.tile_size, sl)
-                elif self.env.map[x][y] == ITEMIDX["lettuce"]:
+                elif self.env.map[x][y] == ITEMIDX["Lettuce"]:
                     fill = pygame.Rect(sl[0], sl[1], self.scale, self.scale)
                     pygame.draw.rect(self.screen, Color.COUNTER, fill)
                     pygame.draw.rect(self.screen, Color.COUNTER_BORDER, fill, 1)
