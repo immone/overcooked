@@ -11,7 +11,6 @@ annotated-types==0.7.0
 anyio==4.8.0
 async-timeout==5.0.1
 attrs==25.1.0
-ca-certificates==2024.12.31
 cachetools==5.5.1
 certifi==2025.1.31
 charset-normalizer==3.4.1
@@ -50,8 +49,6 @@ jinja2==3.1.5
 jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
 kiwisolver==1.4.7
-libcxx==14.0.6
-libffi==3.4.4
 lz4==4.4.3
 markdown==3.7
 markdown-it-py==3.0.0
