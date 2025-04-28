@@ -43,7 +43,7 @@ class Player:
         "metatask failed": -5,
         "correct delivery": 200,
         "wrong delivery": -50, # Increased penalty
-        "step penalty": -0.1
+        "step penalty": -0.01
     }
 
     def __init__(self, grid_dim, task_name, map_type, mode, debug, agent_partner_type='human'):

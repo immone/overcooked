@@ -86,7 +86,10 @@ class FixedItem(Item):
         self.holding = items
     
     def release(self):
+        """Releases the held item and returns it."""
+        item_that_was_held = self.holding 
         self.holding = None
+        return item_that_was_held
 
 class Knife(FixedItem):
     def __init__(self, pos_x, pos_y, holding = None):
@@ -128,7 +131,9 @@ class Plate(MovableItem):
                 item.move(x, y)
 
     def release(self):
+        items_that_were_contained = self.containing
         self.containing = None
+        return items_that_were_contained
 
     @property
     def name(self):

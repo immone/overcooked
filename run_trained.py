@@ -210,7 +210,7 @@ def main(args):
     """Loads trained modules and runs evaluation episodes."""
     reward_config = {
         "metatask failed": 0, "goodtask finished": 5, "subtask finished": 10,
-        "correct delivery": 200, "wrong delivery": -50, "step penalty": -1.,
+        "correct delivery": 200, "wrong delivery": -50, "step penalty": -0.0,
     }
     env_params = {
         "grid_dim": args.grid_dim,

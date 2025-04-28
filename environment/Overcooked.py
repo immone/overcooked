@@ -17,9 +17,13 @@ TASKLIST = [
     "lettuce-onion salad", "lettuce-onion-tomato salad"
 ]
 MAPTYPES_TRAIN = ["A", "B", "C"]
-
-
 class Overcooked_multi(MultiAgentEnv):
+    """
+    A Multi-Agent Environment for the Overcooked game based on the provided code,
+    incorporating fixes for reward calculation, initialization, Gymnasium API compatibility,
+    and detailed debug printing.
+    """
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
     def __init__(self, grid_dim, task, rewardList, map_type="A", mode="vector", debug=False, human_role="helpful", frame_stack_size=4):
         super().__init__()
@@ -28,55 +32,69 @@ class Overcooked_multi(MultiAgentEnv):
         self.n_agent = len(self.agents)
         self.obs_radius = 0
         self.xlen, self.ylen = grid_dim
-
         self.task = task
-        self.rewardList = rewardList
         self.mapType = map_type
-        self.debug = debug
+        self.debug = debug 
         self.mode = mode
-        if self.mode != "vector":
-             print("Warning: This modification assumes vector observations. Image mode might not work correctly.")
-
-        # Store human role setting (though we use multiplier directly in obs)
         self.human_role = human_role
         self.frame_stack_size = frame_stack_size
+        
+
+        self.rewardList = rewardList
+
+        self.rewardList.setdefault("pickup_needed_raw", 1.0)
+        self.rewardList.setdefault("chopped_needed", 2.0)
+        self.rewardList.setdefault("plated_needed_chopped", 3.0)
+        self.rewardList.setdefault("correct_delivery", 200.0)
+        self.rewardList.setdefault("wrong_delivery", -50.0)
+        self.rewardList.setdefault("metatask_failed", -5.0)
+        self.rewardList.setdefault("subtask_finished", 0.0)
+        self.rewardList.setdefault("step_penalty", -0.01)
+        self.rewardList.setdefault("exploration", 0.01)
+        self.rewardList.setdefault("movement_reward", 0.1)
+
+
+        if self.mode != "vector":
+             print("Warning: This environment heavily assumes vector observations. Image mode might not work correctly.")
 
         self.reward = None
-        self.human_multiplier = 1 # Initialize, will be randomized in reset
+        self.reward_stats = {}
+        self.human_multiplier = 1.0
+        self.episode_role_type = self.human_role
 
         self.initMap = self._initialize_map()
+        if not self.initMap:
+             raise ValueError(f"Could not initialize map for grid_dim={grid_dim}, mapType={map_type}, n_agent={self.n_agent}")
         self.map = copy.deepcopy(self.initMap)
+        self.oneHotTask = [1 if t == self.task else 0 for t in TASKLIST]
 
-        self.oneHotTask = [1 if t in self.task else 0 for t in TASKLIST]
+        self.taskCompletionStatus = []
 
-        counter = Counter(self.task)
-        self.taskCompletionStatus = [counter[element] if element in counter else 0 for element in TASKLIST]
+        self._createItems()
 
-        self._createItems() # Creates self.agent, self.itemList etc.
-        # Note: self.n_agent is already set earlier
+        self.action_spaces = {agent_id: spaces.Discrete(5) for agent_id in self.agents}
 
-        self.action_spaces = {agent: spaces.Discrete(5) for agent in self.agents}
+        try:
+            dummy_obs_dict = self._get_obs(add_multiplier=True)
+            single_agent_obs = dummy_obs_dict[self.agents[0]]
+            single_obs_dim = single_agent_obs.shape[0]
+            stacked_obs_dim = single_obs_dim * self.frame_stack_size
+            # Use float32 for compatibility with RLlib/PyTorch/TF
+            obs_space = spaces.Box(low=-1.0, high=1.0, shape=(stacked_obs_dim,), dtype=np.float32)
+            self.observation_spaces = {agent_id: obs_space for agent_id in self.agents}
+        except Exception as e:
+            print(f"Error determining observation space: {e}. Check _get_obs and _get_vector_state.")
+            raise e
 
-        # --- Observation Space Modification ---
-        # Calculate the base observation dimension *before* frame stacking
-        # We get a dummy observation first to determine its length
-        dummy_base_obs_dict = self._get_obs(add_multiplier=True) # Pass flag to include multiplier dim
-        single_obs_dim = len(dummy_base_obs_dict[self.agents[0]])
+        # Observation history for frame stacking
+        self.obs_history = {agent_id: [] for agent_id in self.agents}
 
-        # Now define the observation space including the potential frame stacking
-        stacked_obs_dim = single_obs_dim * frame_stack_size
-        self.observation_spaces = {
-            agent: spaces.Box(low=-1, high=1, shape=(stacked_obs_dim,), dtype=np.float64)
-            # Changed low bound to -1 for the multiplier
-            for agent in self.agents
-        }
-        # --- End Observation Space Modification ---
+        self.game = None
+        try:
+             self.game = Game(self)
+        except Exception as e:
+             print(f"Warning: Failed to initialize Game rendering during __init__: {e}")
 
-        # Initialize history after defining obs space
-        self.obs_history = {agent: [] for agent in self.agents}
-
-        # Initialize game rendering
-        self.game = Game(self)
 
 
     def _initialize_map(self):
@@ -304,51 +322,30 @@ class Overcooked_multi(MultiAgentEnv):
         return map
 
     def _get_stacked_obs(self):
-        current_obs = self._get_obs()
-        
-        for agent in self.agents:
-            # Ensure history is initialized if empty (e.g., first call after reset)
-            if not self.obs_history[agent]:
-                 # Pad with current obs if history is shorter than stack size
-                 self.obs_history[agent] = [current_obs[agent].copy()] * self.frame_stack_size
+        current_obs_dict = self._get_obs()
+        stacked_obs_dict = {}
+
+        for agent_id in self.agents:
+            current_agent_obs = current_obs_dict[agent_id]
+
+            if not self.obs_history[agent_id]:
+                self.obs_history[agent_id] = [current_agent_obs.copy()] * self.frame_stack_size
             else:
-                 self.obs_history[agent].append(current_obs[agent].copy())
-                 if len(self.obs_history[agent]) > self.frame_stack_size:
-                     self.obs_history[agent].pop(0)
+                self.obs_history[agent_id].append(current_agent_obs.copy())
+                if len(self.obs_history[agent_id]) > self.frame_stack_size:
+                    self.obs_history[agent_id].pop(0)
 
-        # Create stacked observations
-        stacked_obs = {}
-        for agent in self.agents:
-            # Pad if needed (e.g. first few steps)
-            history = list(self.obs_history[agent])
+            history = list(self.obs_history[agent_id])
             while len(history) < self.frame_stack_size:
-                history.insert(0, history[0]) # Duplicate oldest frame
+                history.insert(0, history[0].copy())
 
-            # Concatenate the observations
-            stacked_obs[agent] = np.concatenate(history)
+            stacked_obs_dict[agent_id] = np.concatenate(history).astype(np.float32)
 
-        return stacked_obs
+        return stacked_obs_dict
 
     def _createItems(self):
-        """
-        Initialize the items in the environment based on the map configuration.
-
-        This function iterates through the map grid and creates instances of various items
-        (e.g., agents, knives, delivery points, tomatoes, lettuce, onions, plates) at their
-        respective positions. It populates the item dictionary and item list with these instances.
-
-        The item dictionary (itemDic) maps item names to lists of item instances, excluding "space" and "counter".
-        The item list (itemList) is a flattened list of all item instances.
-        The agent list (agent) is a list of all agent instances.
-
-        The function also assigns colors to agents based on their index.
-
-        Returns:
-            None
-        """
-        self.itemDic = {name: [] for name in ITEMNAME if name != "space" and name != "counter"}
+        self.itemDic = {name: [] for name in ITEMNAME if name not in ["space", "counter"]}
         agent_idx = 0
-
         self.knife = []
         self.delivery = []
         self.tomato = []
@@ -356,39 +353,44 @@ class Overcooked_multi(MultiAgentEnv):
         self.onion = []
         self.plate = []
 
+        if not self.map: # Check if map is valid
+             print("Error: Cannot create items, map is empty.")
+             return
+
         for x in range(self.xlen):
             for y in range(self.ylen):
-                item_type = ITEMNAME[self.map[x][y]]
-                if item_type == "agent":
-                    self.itemDic[item_type].append(Agent(x, y, color=AGENTCOLOR[agent_idx]))
-                    agent_idx += 1
-                elif item_type == "knife":
-                    new_knife = Knife(x, y)
-                    self.itemDic[item_type].append(new_knife)
-                    self.knife.append(new_knife)
-                elif item_type == "delivery":
-                    new_delivery = Delivery(x, y)
-                    self.itemDic[item_type].append(new_delivery)
-                    self.delivery.append(new_delivery)
-                elif item_type == "tomato":
-                    new_tomato = Tomato(x, y)
-                    self.itemDic[item_type].append(new_tomato)
-                    self.tomato.append(new_tomato)
-                elif item_type == "lettuce":
-                    new_lettuce = Lettuce(x, y)
-                    self.itemDic[item_type].append(new_lettuce)
-                    self.lettuce.append(new_lettuce)
-                elif item_type == "onion":
-                    new_onion = Onion(x, y)
-                    self.itemDic[item_type].append(new_onion)
-                    self.onion.append(new_onion)
-                elif item_type == "plate":
-                    new_plate = Plate(x, y)
-                    self.itemDic[item_type].append(new_plate)
-                    self.plate.append(new_plate)
+                # Bounds check for map access
+                if x < len(self.map) and y < len(self.map[x]):
+                    item_type_idx = self.map[x][y]
+                    if 0 <= item_type_idx < len(ITEMNAME):
+                        item_type = ITEMNAME[item_type_idx]
+                        # Create items based on type
+                        if item_type == "agent":
+                            if agent_idx < self.n_agent and agent_idx < len(AGENTCOLOR):
+                                agent_instance = Agent(x, y, color=AGENTCOLOR[agent_idx])
+                                self.itemDic[item_type].append(agent_instance)
+                                agent_idx += 1
+                            else: print(f"Warning: Skipped agent creation at ({x},{y}). Index {agent_idx} exceeds n_agent {self.n_agent} or available colors {len(AGENTCOLOR)}.")
+                        elif item_type == "knife":
+                            new_knife = Knife(x, y); self.itemDic[item_type].append(new_knife); self.knife.append(new_knife)
+                        elif item_type == "delivery":
+                            new_delivery = Delivery(x, y); self.itemDic[item_type].append(new_delivery); self.delivery.append(new_delivery)
+                        elif item_type == "tomato":
+                            new_tomato = Tomato(x, y); self.itemDic[item_type].append(new_tomato); self.tomato.append(new_tomato)
+                        elif item_type == "lettuce":
+                            new_lettuce = Lettuce(x, y); self.itemDic[item_type].append(new_lettuce); self.lettuce.append(new_lettuce)
+                        elif item_type == "onion":
+                            new_onion = Onion(x, y); self.itemDic[item_type].append(new_onion); self.onion.append(new_onion)
+                        elif item_type == "plate":
+                            new_plate = Plate(x, y); self.itemDic[item_type].append(new_plate); self.plate.append(new_plate)
+                    else: print(f"Warning: Invalid item index {item_type_idx} in map at ({x},{y})")
+                else: print(f"Warning: Map access out of bounds during item creation at ({x},{y})")
 
         self.itemList = [item for sublist in self.itemDic.values() for item in sublist]
-        self.agent = self.itemDic["agent"]
+        self.agent = self.itemDic.get("agent", [])
+
+        if len(self.agent) != self.n_agent:
+            print(f"FATAL ERROR: Number of agent instances created ({len(self.agent)}) does not match expected n_agent ({self.n_agent}). Check map definition.")
 
     def _initObs(self):
         """
@@ -413,39 +415,62 @@ class Overcooked_multi(MultiAgentEnv):
             agent.obs = obs
         return [np.array(obs)] * self.n_agent
 
-    def _get_vector_state(self, add_multiplier=False):
-        """
-        Get the global state of the environment.
+    def _get_vector_state(self, add_multiplier=True):
+        state_list = []
+        agent_states = {}
 
-        This function creates a global state representation by normalizing the positions of items
-        and appending additional information based on the item type. It includes the positions of
-        all items, their chopped status if they are food, whether plates contain food, and whether
-        knives or agents are holding items. The state is extended with one-hot encoded task information.
-
-        Returns:
-            list: A list containing the state arrays for each agent.
-        """
-        state = []
+        # 1. Item States
         for item in self.itemList:
             x = item.x / self.xlen
             y = item.y / self.ylen
-            state.extend([x, y])
-
-            if isinstance(item, Food):
-                state.append(item.cur_chopped_times / item.required_chopped_times)
-            elif isinstance(item, Plate):
-                state.append(1.0 if item.containing else 0.0)
-            elif isinstance(item, Knife):
-                state.append(1.0 if item.holding else 0.0)
+            state_list.extend([x, y])
+            if isinstance(item, Food): state_list.append(item.cur_chopped_times / item.required_chopped_times if hasattr(item,'required_chopped_times') and item.required_chopped_times > 0 else 0.0)
+            elif isinstance(item, Plate): state_list.append(1.0 if hasattr(item, 'containing') and item.containing else 0.0)
+            elif isinstance(item, Knife): state_list.append(1.0 if hasattr(item, 'holding') and item.holding else 0.0)
             elif isinstance(item, Agent):
-                state.append(1.0 if item.holding else 0.0)
+                agent_states[self.agents[self.agent.index(item)]] = { 
+                    'x': x, 'y': y,
+                    'holding_bool': 1.0 if hasattr(item, 'holding') and item.holding else 0.0,
+                    'holding_item': getattr(item.holding, 'rawName', None) if hasattr(item, 'holding') and item.holding else None
+                }
+                state_list.append(1.0 if hasattr(item, 'holding') and item.holding else 0.0)
 
-        state.extend(self.oneHotTask)
-        if add_multiplier:
-             # Add the multiplier value (-1 or 1) as the last feature
-             state.append(float(self.human_multiplier))
-             
-        return np.array(state, dtype=np.float64)
+        # 2. Task Encoding
+        state_list.extend(self.oneHotTask)
+
+        # 3. Role/Multiplier Encoding
+        role_encoding = [0.0, 0.0, 0.0]; current_multiplier = 0.0
+        if hasattr(self, 'human_multiplier'):
+            current_multiplier = self.human_multiplier
+            if current_multiplier > 0: role_encoding[0] = 1.0
+            elif current_multiplier < 0: role_encoding[1] = 1.0
+            else: role_encoding[2] = 1.0
+        else: role_encoding[2] = 1.0
+        state_list.extend(role_encoding)
+        state_list.append(float(current_multiplier))
+
+        partner_states = []
+        agent_ids = list(self._agent_ids) # e.g., ["human", "ai"]
+        for i, agent_id in enumerate(agent_ids):
+            partner_id = agent_ids[1-i] # Get the ID of the other agent
+            if partner_id in agent_states:
+                partner_state = agent_states[partner_id]
+                partner_states.extend([
+                    partner_state['x'],
+                    partner_state['y'],
+                    partner_state['holding_bool']
+                ])
+                item_held = partner_state['holding_item'],
+                holding_one_hot = [1.0 if name == item_held else 0.0 for name in ITEMNAME if name not in ['agent','space','counter']]
+                partner_states.extend(holding_one_hot)
+            else:
+                print(f"Warning: Could not find state for partner {partner_id}")
+                partner_states.extend([0.0, 0.0, 0.0])
+
+        state_list.extend(partner_states)
+        final_state = np.array(state_list, dtype=np.float32)
+        # print(f"Debug: Final state vector length = {len(final_state)}") # Debug length
+        return final_state
 
     def _get_image_state(self):
         """
@@ -461,22 +486,16 @@ class Overcooked_multi(MultiAgentEnv):
         return [self.game.get_image_obs()] * self.n_agent
 
     def _get_obs(self, add_multiplier=True):
-        """
-        Returns observation for each agent. Adds human_multiplier if add_multiplier=True.
-        Assumes vector mode for this modification.
-        """
         if self.mode != "vector":
-            return self._get_image_state() if self.obs_radius == 0 else self._get_image_obs()
+            raise NotImplementedError("Image mode not fully supported.")
+        if self.obs_radius != 0:
+            raise NotImplementedError("Partial observability vector mode not fully supported.")
 
-        if self.obs_radius > 0:
-             # TODO: If using partial observability, modify _get_vector_obs
-             print("Warning: Partial observability vector mode not explicitly updated for multiplier.")
-             base_obs_vector = self._get_vector_state(add_multiplier=add_multiplier)
+        # Get the global state vector
+        base_obs_vector = self._get_vector_state(add_multiplier=add_multiplier)
 
-        else:
-             base_obs_vector = self._get_vector_state(add_multiplier=add_multiplier)
-
-        obs_dict = {agent: base_obs_vector.copy() for agent in self.agents}
+        # Create the observation dictionary for multi-agent API
+        obs_dict = {agent_id: base_obs_vector.copy() for agent_id in self.agents}
         return obs_dict
 
     def _get_vector_obs(self):
@@ -694,12 +713,60 @@ class Overcooked_multi(MultiAgentEnv):
 
     def get_avail_actions(self):
         return [self.get_avail_agent_actions(i) for i in range(self.n_agent)]
+    
+    def _update_coordination_metrics(self, actions, positions):
+        """Track and reward coordination behavior"""
+        
+        if positions["human"] and positions["ai"]:
+            human_pos = positions["human"]
+            ai_pos = positions["ai"]
+
+        # More sophisticated tracking could be added here
+        return self.coordination_events
+
+    def _initialize_coordination_tracking(self):
+        """Track coordination between agents for trust learning"""
+        self.coordination_events = {
+            "ai_following_human_lead": 0,
+            "complementary_actions": 0,
+            "conflicting_actions": 0,
+            "successful_handoffs": 0,
+        }
+        
+        # Previous agent positions/actions
+        self.previous_positions = {agent: None for agent in self.agents}
+        self.previous_actions = {agent: None for agent in self.agents}
 
     def get_avail_agent_actions(self, nth):
         return [1] * self.action_spaces[nth].n
 
     def action_space_sample(self, i):
         return np.random.randint(self.action_spaces[i].n)
+
+    def _add_reward(self, reward_type, amount=None):
+        """Helper to add reward and track it by type. Handles None reward."""
+        # Ensure self.reward is initialized (should be done in step start)
+        if self.reward is None:
+             print(f"FATAL ERROR: _add_reward called when self.reward is None! Step:{self.step_count}, Type:{reward_type}")
+             self.reward = 0.0
+
+        if amount is None:
+            amount = float(self.rewardList.get(reward_type, 0.0))
+        else:
+             amount = float(amount)
+
+        # Log before adding for clarity
+        reward_before_adding = self.reward
+        print(f"DEBUG Reward Step {self.step_count}: Adding Type='{reward_type}', Amount={amount:.4f}. Step Reward BEFORE add: {reward_before_adding:.4f}", end="")
+
+        self.reward += amount
+        print(f", AFTER add: {self.reward:.4f}")
+
+        if not hasattr(self, 'reward_stats'): self.reward_stats = {}
+        if reward_type not in self.reward_stats: self.reward_stats[reward_type] = 0.0
+        self.reward_stats[reward_type] += amount
+
+        return amount
     
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -708,19 +775,41 @@ class Overcooked_multi(MultiAgentEnv):
         self._createItems()
         self.step_count = 0
 
+        self.reward_stats = {
+            "step_penalty": 0.0,
+            "subtask_finished": 0.0,
+            "correct_delivery": 0.0,
+            "wrong_delivery": 0.0,
+            "metatask_failed": 0.0,
+            "pickup_needed_raw": 0.0, # New specific reward
+            "chopped_needed": 0.0,    # New specific reward
+            "plated_needed_chopped": 0.0,
+        }
+
         counter = Counter(self.task)
         self.taskCompletionStatus = [counter[element] if element in counter else 0 for element in TASKLIST]
+
+        self.episode_role_type = self.human_role
 
         if self.human_role == "helpful":
             self.human_multiplier = 1.0
         elif self.human_role == "adversarial":
             self.human_multiplier = -1.0
-        elif self.human_role == "random":
+        elif self.human_role == "neutral":
+            self.human_multiplier = 0.0
+        elif self.human_role == "random_h_a":
             self.human_multiplier = float(random.choice([1, -1]))
+            self.episode_role_type = "random_helpful" if self.human_multiplier > 0 else "random_adversarial"
+        elif self.human_role == "random_h_n_a":
+            self.human_multiplier = float(random.choice([1, 0, -1]))
+            if self.human_multiplier > 0: self.episode_role_type = "random_helpful"
+            elif self.human_multiplier < 0: self.episode_role_type = "random_adversarial"
+            else: self.episode_role_type = "random_neutral"
         else:
-            print(f"Warning: Unknown human_role '{self.human_role}'. Defaulting to random.")
-            self.human_multiplier = float(random.choice([1, -1]))
-            
+            print(f"Warning: Unknown human_role '{self.human_role}'. Defaulting to helpful.")
+            self.human_multiplier = 1.0
+            self.episode_role_type = "helpful"
+
         standard_obs = self._get_obs()
 
         self.obs_history = {agent: [standard_obs[agent].copy()] for agent in self.agents}
@@ -731,281 +820,385 @@ class Overcooked_multi(MultiAgentEnv):
         else:
              return standard_obs, {}
     
-    def step(self, action):
+    def _debug_rewards(self, base_reward):
+        """Return tracked reward components for debugging"""
+        debug_info = self.reward_stats.copy()
+        debug_info["total_step_reward_calculated"] = float(base_reward)
+        return debug_info
 
-        """
-        Parameters
-        ----------
-        action: list
-            action for each agent
+    
+    def _track_reward_components(self):
+        """Create a data structure to track reward components for debugging"""
+        return {
+            "total": 0.0,
+            "step_penalty": 0.0,
+            "subtask_finished": 0.0,
+            "metatask_failed": 0.0,
+            "correct_delivery": 0.0,
+            "wrong_delivery": 0.0,
+            "coordination_bonus": 0.0,
+            "implicit_bonuses": 0.0
+        }
+    
+    def step(self, action_dict: dict):
+        """ Executes one environment step for all agents. """
 
-        Returns
-        -------
-        obs : list
-            observation for each agent.
-        rewards : list
-        terminate : list
-        info : dictionary
-        """
+        step_penalty = float(self.rewardList.get("step penalty", -0.01))
+        self.reward = step_penalty
 
-        action = [action['human'], action['ai']] # some ugly hack to make the environment work with rllib.
+        if not hasattr(self, 'reward_stats'): self.reward_stats = {}
+        self.reward_stats["step_penalty"] = self.reward_stats.get("step_penalty", 0.0) + step_penalty
+
 
         self.step_count += 1
+        print(f"\n--- Step {self.step_count} (Role: {self.episode_role_type}) ---")
 
-        # Executing any action incurs a step penalty.
-        # If the step count reaches 24, mark done as True and reset the counter.
-        self.reward = self.rewardList["step penalty"]
-        done = False
+        if not isinstance(action_dict, dict):
+             print(f"Warning: Step received non-dict action {action_dict}. Defaulting.")
+             action_dict = {agent_id: 4 for agent_id in self.agents} # Default to 'stay'
+        # Get action for each agent from the dict, defaulting to 'stay'
+        action_list = [action_dict.get(agent_id, 4) for agent_id in self.agents]
 
-        info = {}
-        info['cur_mac'] = action
-        info['mac_done'] = [True] * self.n_agent
-        info['collision'] = []
+        if any(a != 4 for a in action_list):
+             self._add_reward("exploration", self.rewardList.get("exploration", 0.01))
 
-        all_action_done = False
+        pickup_reward = float(self.rewardList.get("pickup_needed_raw", 0.0))
+        chop_reward = float(self.rewardList.get("chopped_needed", 0.0))
+        plate_reward = float(self.rewardList.get("plated_needed_chopped", 0.0))
+        correct_delivery_reward = float(self.rewardList.get("correct_delivery", 0.0))
+        wrong_delivery_penalty = float(self.rewardList.get("wrong_delivery", 0.0))
+        metatask_fail_penalty = float(self.rewardList.get("metatask_failed", 0.0))
 
-        for agent in self.agent:
+        step_specific_info = {'collision': []} # Info specific to this step (e.g., collisions)
+        done = False # Flag for task completion this step
 
-            agent.moved = False
+        # Sequential execution (process one agent's action at a time)
+        for idx, agent_id in enumerate(self.agents):
+            if idx >= len(self.agent):
+                 print(f"Error: Agent index {idx} out of bounds for self.agent list (len {len(self.agent)})")
+                 continue
+            agent = self.agent[idx] # Get the Agent object instance
+            agent_action = action_list[idx] # Get the action for this agent
+            print(f"DEBUG Step {self.step_count}: Agent {idx} ({agent_id}) attempting Action {agent_action}")
 
-        if self.debug:
-            print("in overcooked primitive actions:", action)
-            pass
+            if 0 <= agent_action < 4:
+                target_x = agent.x + DIRECTION[agent_action][0]
+                target_y = agent.y + DIRECTION[agent_action][1]
 
-        while not all_action_done:
-            for idx, agent in enumerate(self.agent):
-                agent_action = action[idx]
-                if agent.moved:
+                if not (0 <= target_x < self.xlen and 0 <= target_y < self.ylen):
+                    print(f"DEBUG Step {self.step_count} Agent {idx}: Move out of bounds.")
                     continue
-                agent.moved = True
 
-                if agent_action < 4:
-                    target_x = agent.x + DIRECTION[agent_action][0]
-                    target_y = agent.y + DIRECTION[agent_action][1]
-                    target_name = ITEMNAME[self.map[target_x][target_y]]
+                target_obj_idx = self.map[target_x][target_y]
+                target_name = ITEMNAME[target_obj_idx]
 
-                    if target_name == "agent":
-                        target_agent = self._findItem(target_x, target_y, target_name)
-                        if not target_agent.moved:
-                            agent.moved = False
-                            target_agent_action = action[AGENTCOLOR.index(target_agent.color)]
-                            if target_agent_action < 4:
-                                new_target_agent_x = target_agent.x + DIRECTION[target_agent_action][0]
-                                new_target_agent_y = target_agent.y + DIRECTION[target_agent_action][1]
-                                if new_target_agent_x == agent.x and new_target_agent_y == agent.y:
-                                    target_agent.move(new_target_agent_x, new_target_agent_y)
-                                    agent.move(target_x, target_y)
-                                    agent.moved = True
-                                    target_agent.moved = True
+                if target_name == "agent":
+                    print(f"DEBUG Step {self.step_count} Agent {idx}: Collision with agent.")
+                    step_specific_info['collision'].append(agent_id)
+                    continue # Cannot move into another agent
+                elif target_name != "space":
+                    print(f"DEBUG Step {self.step_count} Agent {idx}: Move blocked by {target_name}.")
+                    continue # Cannot move into walls, counters, items etc.
+                else:
+                    print(f"DEBUG Step {self.step_count} Agent {idx}: Moving to ({target_x},{target_y})")
+                    self.map[agent.x][agent.y] = ITEMIDX["space"] # Old position becomes space
+                    agent.move(target_x, target_y) # Update agent's internal position
+                    self.map[agent.x][agent.y] = ITEMIDX["agent"] # New position shows agent
 
-                    # If the target is space, move the agent to the target position
-                    elif  target_name == "space":
-                        self.map[agent.x][agent.y] = ITEMIDX["space"]
-                        agent.move(target_x, target_y)
-                        self.map[target_x][target_y] = ITEMIDX["agent"]
+            elif agent_action == 4:
+                interaction_occurred_this_agent = False
+                for dx, dy in DIRECTION:
+                    target_x = agent.x + dx
+                    target_y = agent.y + dy
 
-                    # pickup and chop 
-                    # If the agent doesn't have anything in hand
-                    elif not agent.holding:
-                        # If the target is a movable item, pick it up
-                        if target_name in ["tomato", "lettuce", "plate", "onion"]:
-                            item = self._findItem(target_x, target_y, target_name)
-                            agent.pickup(item)
-                            self.map[target_x][target_y] = ITEMIDX["counter"]
+                    # Check bounds for target square
+                    if not (0 <= target_x < self.xlen and 0 <= target_y < self.ylen):
+                        continue # Skip if adjacent square is out of bounds
 
-                        elif target_name == "knife":
-                            knife = self._findItem(target_x, target_y, target_name)
-                            # If the knife is holding a plate, pick it up
-                            if isinstance(knife.holding, Plate):
-                                item = knife.holding
-                                knife.release()
-                                agent.pickup(item)
-                            # If the knife is holding food
-                            elif isinstance(knife.holding, Food):
-                                # If the food is chopped, pick it up
-                                if knife.holding.chopped:
-                                    item = knife.holding
-                                    knife.release()
-                                    agent.pickup(item)
-                                # If the food is not chopped, chop it once
-                                else:
-                                    knife.holding.chop()
-                                    self.reward += self.rewardList["subtask finished"]
-                                    # If the food is chopped after chopping, check if it is part of the current task
-                                    if knife.holding.chopped:
-                                        for task in self.task:
-                                            if knife.holding.rawName in task:
-                                                # Reward for completing a mini task
-                                                self.reward += self.rewardList["subtask finished"]
-                    # put down
-                    # If the agent is currently holding something
-                    elif agent.holding:
-                        # If the target is a counter, the agent will put down the item
-                        if target_name == "counter":
-                            if agent.holding.rawName in ["tomato", "lettuce", "onion", "plate"]:
-                                # Change the counter to hold the item the agent was holding
-                                self.map[target_x][target_y] = ITEMIDX[agent.holding.rawName]
-                            # Reset the agent to not holding anything
-                            agent.putdown(target_x, target_y)
-                            self.reward += self.rewardList["metatask failed"]
-                        # If the target is a plate
-                        elif target_name == "plate":
-                            # If the agent is holding food, check if it is chopped
-                            if isinstance(agent.holding, Food):
-                                if agent.holding.chopped:
-                                    # Reward for placing chopped food on a plate
-                                    self.reward += self.rewardList["subtask finished"]
-                                    plate = self._findItem(target_x, target_y, target_name)
-                                    item = agent.holding
-                                    # Put down the item and reset the agent
-                                    agent.putdown(target_x, target_y)
-                                    # Place the food on the plate
-                                    plate.contain(item)
-                            else:
-                                self.reward += self.rewardList["metatask failed"]
-                        # If the target is a knife
-                        elif target_name == "knife":
-                            knife = self._findItem(target_x, target_y, target_name)
-                            # If the knife is empty, place the item on the knife
-                            if not knife.holding:
-                                item = agent.holding
-                                agent.putdown(target_x, target_y)
-                                knife.hold(item)
-                                if isinstance(item, Food):
-                                    if item.chopped:
-                                        # Penalty for placing chopped food back on the knife
-                                        self.reward += self.rewardList["metatask failed"]
-                                    else:
-                                        # Reward for placing unchopped food on the knife
-                                        self.reward += self.rewardList["subtask finished"]
-                                else:
-                                    self.reward += self.rewardList["metatask failed"]
-                            # If the knife is holding food and the agent is holding a plate, place the food on the plate
-                            elif isinstance(knife.holding, Food) and isinstance(agent.holding, Plate):
-                                item = knife.holding
-                                if item.chopped:
-                                    self.reward += self.rewardList["subtask finished"]
-                                    knife.release()
-                                    agent.holding.contain(item)
-                                else:
-                                    # Penalty for placing unchopped food on a plate
-                                    self.reward += self.rewardList["metatask failed"]
-                            elif isinstance(knife.holding, Food) and not isinstance(agent.holding, Plate):
-                                # Penalty for holding food while the knife is holding food
-                                self.reward += self.rewardList["metatask failed"]
-                            # If the knife is holding a plate and the agent is holding food, place the food on the plate
-                            elif isinstance(knife.holding, Plate) and isinstance(agent.holding, Food):
-                                plate_item = knife.holding
-                                food_item = agent.holding
-                                if food_item.chopped:
-                                    self.reward += self.rewardList["subtask finished"]
-                                    knife.release()
-                                    agent.pickup(plate_item)
-                                    agent.holding.contain(food_item)
-                                else:
-                                    # Penalty for placing unchopped food on a plate
-                                    self.reward += self.rewardList["metatask failed"]
-                            elif isinstance(knife.holding, Plate) and isinstance(agent.holding, Plate):
-                                # Penalty for holding a plate while the knife is holding a plate
-                                self.reward += self.rewardList["metatask failed"]
-                        # If the target is a delivery point
-                        elif target_name == "delivery":
-                            # If the agent is holding a plate, check if it contains food
-                            if isinstance(agent.holding, Plate):
-                                if agent.holding.containing:
-                                    delivered_ingredients = set()
-                                    valid_delivery = True
-                                    for item in agent.holding.containing:
-                                        if isinstance(item, Food):
-                                            if item.chopped:
-                                                delivered_ingredients.add(item.rawName)
-                                            else:
-                                                valid_delivery = False # Must be chopped
-                                                break
-                                        else:
-                                            valid_delivery = False # Can only deliver food on plate
-                                            break
-                                    required_ingredients = {i for i, count in enumerate(self.taskCompletionStatus) if count > 0}
-                                    if valid_delivery and delivered_ingredients == required_ingredients:
-                                        # Correct delivery!
-                                        self.reward += self.rewardList["correct delivery"]
-                                        done = True # Assume delivering the main task finishes the episode
+                    # Get name of object at target square
+                    target_obj_idx = self.map[target_x][target_y]
+                    target_name = ITEMNAME[target_obj_idx]
 
-                                        # Refresh items (original logic seems okay here)
-                                        item = agent.holding
-                                        agent.putdown(target_x, target_y)
-                                        food = item.containing
-                                        item.release()
-                                        item.refresh()
-                                        self.map[item.x][item.y] = ITEMIDX[item.name]
-                                        for f in food:
-                                            f.refresh()
-                                            self.map[f.x][f.y] = ITEMIDX[f.rawName]
+                    # Cannot interact with empty space or other agents via action 4
+                    if target_name in ["space", "agent"]:
+                        continue
 
-                                    else:
-                                        # Wrong delivery
-                                        self.reward += self.rewardList["wrong delivery"]
-                                        # Refresh items even on wrong delivery
-                                        item = agent.holding
-                                        agent.putdown(target_x, target_y)
-                                        if item.containing: # Check if plate wasn't empty
-                                             food = item.containing
-                                             for f in food:
-                                                 f.refresh()
-                                                 self.map[f.x][f.y] = ITEMIDX[f.rawName]
-                                        item.release()
-                                        item.refresh()
-                                        self.map[item.x][item.y] = ITEMIDX[item.name]
+                    if target_name == "counter":
+                        print(f"DEBUG Step {self.step_count} Agent {idx}: Trying INTERACT with COUNTER at ({target_x},{target_y}). Agent holding: {agent.holding}")
+                        if agent.holding:
+                             # Try to place held item onto the counter
+                             held_item_name = getattr(agent.holding, 'rawName', 'unknown_item')
+                             # Check if the counter tile on the map is actually clear (index 1)
+                             if self.map[target_x][target_y] == ITEMIDX["counter"]:
+                                 if held_item_name in ITEMIDX: # Check if item type is valid on map
+                                      print(f"DEBUG Step {self.step_count} Agent {idx}: Putting down {held_item_name} on counter.")
+                                      self.map[target_x][target_y] = ITEMIDX[held_item_name] # Update map state
+                                      agent.putdown(target_x, target_y) # Agent releases item
+                                      interaction_occurred_this_agent = True; break # Interaction done
+                                 else:
+                                      print(f"Warning: Cannot put down {held_item_name}, not in ITEMIDX.")
+                                      self._add_reward("metatask_failed", metatask_fail_penalty); interaction_occurred_this_agent = True; break
+                             else: # Counter tile is occupied
+                                  occupying_item = ITEMNAME[self.map[target_x][target_y]]
+                                  print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot putdown, counter occupied by {occupying_item}.")
+                                  self._add_reward("metatask_failed", metatask_fail_penalty); interaction_occurred_this_agent = True; break
+                        else:
+                             # Interacting with counter while empty-handed does nothing
+                             print(f"DEBUG Step {self.step_count} Agent {idx}: Interacted with empty counter (no effect).")
+                             interaction_occurred_this_agent = True; break # Counts as interaction attempt, stop checking directions
 
-                                else: # Plate is empty
-                                    self.reward += self.rewardList["wrong delivery"]
-                                    plate = agent.holding
-                                    agent.putdown(target_x, target_y)
-                                    plate.refresh()
-                                    self.map[plate.x][plate.y] = ITEMIDX[plate.name]
-                            else: # Holding something other than a plate
-                                self.reward += self.rewardList["wrong delivery"]
-                                held_item = agent.holding
-                                agent.putdown(target_x, target_y)
-                                held_item.refresh() # Refresh the wrongly delivered item
-                                self.map[held_item.x][held_item.y] = ITEMIDX[held_item.rawName]
-                        # If the target is food, the agent can only put down the item if it is holding a plate and the food is chopped
-                        elif target_name in ["tomato", "lettuce", "onion"]:
-                            item = self._findItem(target_x, target_y, target_name)
-                            if item.chopped and isinstance(agent.holding, Plate):
-                                self.reward += self.rewardList["subtask finished"]
-                                agent.holding.contain(item)
-                                self.map[target_x][target_y] = ITEMIDX["counter"]
-                            elif not item.chopped and isinstance(agent.holding, Plate):
-                                self.reward += self.rewardList["metatask failed"]
-                            elif isinstance(agent.holding, Food):
-                                self.reward += self.rewardList["metatask failed"]
+                    # Handle interaction with other items (Plate, Knife, Food, Delivery)
+                    else:
+                        # Find the actual item instance at the target location
+                        item = self._findItem(target_x, target_y, target_name)
 
-            # End of the for loop for all agents' actions
-            all_action_done = True
+                        # Safety check if item instance wasn't found (shouldn't happen if map is consistent)
+                        if item is None and target_name != "delivery": # Delivery might not be an 'item' instance
+                            print(f"Warning: Map indicates {target_name} at ({target_x},{target_y}) but _findItem returned None.")
+                            continue # Skip interaction attempt for this direction
 
-            # Check if any agent has not moved
-            for agent in self.agent:
-                if not agent.moved:
-                    all_action_done = False
+                        print(f"DEBUG Step {self.step_count} Agent {idx}: Trying INTERACT with {target_name} at ({target_x},{target_y}). Agent holding: {agent.holding}")
 
-        terminateds = {"__all__": done or self.step_count >= 80} # Termination condition
+                        # Case 1: Agent is NOT holding anything
+                        if not agent.holding:
+                            if target_name in ["tomato", "lettuce", "onion", "plate"] and item:
+                                print(f"DEBUG Step {self.step_count} Agent {idx}: Trying PICKUP {target_name}")
+                                agent.pickup(item) # Agent now holds the item
+                                self.map[target_x][target_y] = ITEMIDX["counter"] # Location becomes counter tile
+                                item_name = getattr(item, 'rawName', 'Item') # Get name for logging
+                                print(f"DEBUG Step {self.step_count} Agent {idx}: Picked up {item_name}")
+                                # Add shaping reward if applicable
+                                if isinstance(item, Food) and not item.chopped:
+                                    task_ingredients = self.task.replace(' salad','').split('-')
+                                    if item.rawName in task_ingredients:
+                                        self._add_reward("pickup_needed_raw", pickup_reward)
+                                interaction_occurred_this_agent = True; break # Action done
 
-        # Apply human multiplier to the base reward calculated during the step
-        human_final_reward = self.reward * self.human_multiplier
-        ai_final_reward = self.reward # AI gets the original reward
+                            elif target_name == "knife" and item:
+                                knife = item
+                                print(f"DEBUG Step {self.step_count} Agent {idx}: Trying INTERACT with knife (empty handed)")
+                                if isinstance(knife.holding, Food): # Knife has food
+                                    food_on_knife = knife.holding
+                                    if food_on_knife.chopped: # Pick up chopped food
+                                        print(f"DEBUG Step {self.step_count} Agent {idx}: Picking up chopped {food_on_knife.rawName} from knife")
+                                        item_to_pickup = knife.release() # Assumes release returns item
+                                        agent.pickup(item_to_pickup)
+                                        interaction_occurred_this_agent = True; break
+                                    else: # Chop the food on the knife
+                                        print(f"DEBUG Step {self.step_count} Agent {idx}: Chopping {food_on_knife.rawName} on knife")
+                                        food_on_knife.chop() # Assumes chop method exists
+                                        if food_on_knife.chopped:
+                                             print(f"DEBUG Step {self.step_count} Agent {idx}: Finished chopping {food_on_knife.rawName}")
+                                             task_ingredients = self.task.replace(' salad','').split('-')
+                                             if food_on_knife.rawName in task_ingredients:
+                                                 self._add_reward("chopped_needed", chop_reward)
+                                        interaction_occurred_this_agent = True; break
+                                elif isinstance(knife.holding, Plate): # Pick up plate from knife
+                                    print(f"DEBUG Step {self.step_count} Agent {idx}: Picking up plate from knife")
+                                    item_to_pickup = knife.release()
+                                    agent.pickup(item_to_pickup)
+                                    interaction_occurred_this_agent = True; break
+                                else: # Knife is empty
+                                    print(f"DEBUG Step {self.step_count} Agent {idx}: Interacted with empty knife (no effect).")
+                                    interaction_occurred_this_agent = True; break # Counts as interaction attempt
+                            # Add other interactions for empty-handed agent if needed (e.g., delivery?)
 
-        rewards = {"human": human_final_reward, "ai": ai_final_reward}
-        infos = {agent: info for agent in self.agents}
-        truncateds = {'__all__': False}
+                        # Case 2: Agent IS holding something 
+                        elif agent.holding:
+                            held_item = agent.holding # Reference to the item agent is holding
+                            # Interaction logic when agent is holding item
+                            if target_name == "plate" and item:
+                                plate = item
+                                print(f"DEBUG Step {self.step_count} Agent {idx}: Trying PLATE {held_item.rawName}")
+                                if isinstance(held_item, Food) and held_item.chopped:
+                                    # Check if item already on plate (prevents duplicate adds/rewards)
+                                    already_on_plate = plate.containing and hasattr(held_item, 'rawName') and held_item.rawName in [getattr(f, 'rawName', None) for f in plate.containing]
+                                    if not already_on_plate:
+                                        task_ingredients = self.task.replace(' salad','').split('-')
+                                        is_needed = hasattr(held_item, 'rawName') and held_item.rawName in task_ingredients
+                                        print(f"DEBUG Step {self.step_count} Agent {idx}: Plating {held_item.rawName} onto plate.")
+                                        # Agent puts down item, plate contains it
+                                        agent.putdown(target_x, target_y) # Item logically moves to plate
+                                        plate.contain(held_item) # Assumes Plate.contain method works
+                                        if is_needed: self._add_reward("plated_needed_chopped", plate_reward)
+                                        interaction_occurred_this_agent = True; break
+                                    else: print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot plate, {getattr(held_item,'rawName','Item')} already on plate.")
+                                elif isinstance(held_item, Food) and not held_item.chopped:
+                                    print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot plate raw food.")
+                                    self._add_reward("metatask_failed", metatask_fail_penalty); interaction_occurred_this_agent = True; break
+                                else: # Trying to plate non-food or invalid item
+                                    print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot plate item {held_item}")
+                                    self._add_reward("metatask_failed", metatask_fail_penalty); interaction_occurred_this_agent = True; break
 
-        # Get next observation (standard or stacked)
-        if self.frame_stack_size > 1:
-             next_obs = self._get_stacked_obs()
-        else:
-             next_obs = self._get_obs() # Will include multiplier
+                            elif target_name == "knife" and item:
+                                knife = item
+                                print(f"DEBUG Step {self.step_count} Agent {idx}: Trying INTERACT with knife while holding {getattr(held_item,'rawName','Item')}")
+                                if not knife.holding: # Knife empty -> Try placing unchopped food on it
+                                    if isinstance(held_item, Food) and not held_item.chopped:
+                                         print(f"DEBUG Step {self.step_count} Agent {idx}: Placing {held_item.rawName} on knife")
+                                         agent.putdown(target_x, target_y) # Item moves to knife location
+                                         knife.hold(held_item) # Assumes Knife.hold method exists
+                                         interaction_occurred_this_agent = True; break
+                                    else: # Cannot place chopped food or non-food on empty knife
+                                         print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot place {getattr(held_item,'rawName','Item')} on empty knife.")
+                                         self._add_reward("metatask_failed", metatask_fail_penalty); interaction_occurred_this_agent = True; break
+                                elif isinstance(knife.holding, Food): # Knife has food
+                                     if isinstance(held_item, Plate): # Holding plate -> Try plating from knife
+                                          food_on_knife = knife.holding
+                                          if food_on_knife.chopped:
+                                               # Check if already on plate
+                                               already_on_plate = held_item.containing and hasattr(food_on_knife,'rawName') and food_on_knife.rawName in [getattr(f, 'rawName', None) for f in held_item.containing]
+                                               if not already_on_plate:
+                                                   task_ingredients = self.task.replace(' salad','').split('-')
+                                                   is_needed = hasattr(food_on_knife,'rawName') and food_on_knife.rawName in task_ingredients
+                                                   print(f"DEBUG Step {self.step_count} Agent {idx}: Plating {food_on_knife.rawName} from knife")
+                                                   plate_content = knife.release() # Knife releases item
+                                                   held_item.contain(plate_content) # Plate (held_item) contains it
+                                                   if is_needed: self._add_reward("plated_needed_chopped", plate_reward)
+                                                   interaction_occurred_this_agent = True; break
+                                               else: print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot plate from knife, {getattr(food_on_knife,'rawName','Item')} already on plate.")
+                                          else: # Knife has raw food
+                                               print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot plate raw food from knife.")
+                                               self._add_reward("metatask_failed", metatask_fail_penalty); interaction_occurred_this_agent = True; break
+                                     else: # Agent holding something else (e.g., food) -> Invalid action
+                                          print(f"DEBUG Step {self.step_count} Agent {idx}: Invalid interaction: Holding {getattr(held_item,'rawName','Item')}, knife has {getattr(knife.holding,'rawName','Item')}")
+                                          self._add_reward("metatask_failed", metatask_fail_penalty); interaction_occurred_this_agent = True; break
+                                # Add cases for knife holding plate if needed
+                                else: # Knife has plate or unknown state
+                                     print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot interact with knife (knife state: {knife.holding})")
+                                     self._add_reward("metatask_failed", metatask_fail_penalty); interaction_occurred_this_agent = True; break
 
-        return next_obs, rewards, terminateds, truncateds, infos # Match gymnasium standard
+                            elif target_name == "delivery": # No item instance needed for delivery spot usually
+                                print(f"DEBUG Step {self.step_count} Agent {idx}: Attempting DELIVER item {held_item}")
+                                if isinstance(held_item, Plate) and hasattr(held_item, 'containing') and held_item.containing:
+                                    plate = held_item
+                                    dishName = getattr(plate, 'containedName', '')
+                                    task_name_for_check = self.task
+                                    print(f"DEBUG Step {self.step_count} Agent {idx}: Delivering plate with '{dishName}', Task is '{task_name_for_check}'")
+
+                                    is_correct_dish = False
+                                    try:
+                                        # Example: Compare sets of ingredient names (case-insensitive)
+                                        # Requires containedName format like "tomato-lettuce"
+                                        dish_parts = set(d.strip().lower() for d in dishName.replace('Chopped','').replace('Fresh','').split('-') if d)
+                                        task_parts = set(t.strip().lower() for t in task_name_for_check.replace(' salad','').split('-') if t)
+                                        print(f"DEBUG Dish Check: Dish Parts={dish_parts}, Task Parts={task_parts}") # Debug the check itself
+                                        if dish_parts and task_parts and dish_parts == task_parts:
+                                            is_correct_dish = True
+                                    except AttributeError:
+                                         print(f"Warning: Could not parse dishName '{dishName}' during delivery check.")
+
+                                    if is_correct_dish:
+                                        print(f"DEBUG Step {self.step_count} Agent {idx}: Dish IS correct.")
+                                        try:
+                                            task_index = TASKLIST.index(task_name_for_check)
+                                            if self.taskCompletionStatus[task_index] > 0:
+                                                self.taskCompletionStatus[task_index] -= 1
+                                                self._add_reward("correct_delivery", correct_delivery_reward)
+                                                print(f"DEBUG Step {self.step_count} Agent {idx}: CORRECT DELIVERY! Task status: {self.taskCompletionStatus}")
+                                                done = all(value == 0 for value in self.taskCompletionStatus) # Check if all tasks done
+
+                                                # Refresh delivered items
+                                                foods_delivered = plate.containing; agent.putdown(target_x, target_y)
+                                                plate.release(); plate.refresh(); self.map[plate.x][plate.y] = ITEMIDX["plate"]
+                                                for f in foods_delivered: f.refresh(); self.map[f.x][f.y] = ITEMIDX.get(f.rawName, ITEMIDX["counter"]) # Use get for safety
+                                                interaction_occurred_this_agent = True; break
+                                            else: # Delivered correct dish, but task already completed
+                                                print(f"DEBUG Step {self.step_count} Agent {idx}: Correct dish delivered, but task count was already 0.")
+                                                self._add_reward("wrong_delivery", wrong_delivery_penalty)
+                                                # Refresh items
+                                                foods_delivered = plate.containing; agent.putdown(target_x, target_y)
+                                                plate.release(); plate.refresh(); self.map[plate.x][plate.y] = ITEMIDX["plate"]
+                                                for f in foods_delivered: f.refresh(); self.map[f.x][f.y] = ITEMIDX.get(f.rawName, ITEMIDX["counter"])
+                                                interaction_occurred_this_agent = True; break
+                                        except ValueError: # Task name not found in TASKLIST
+                                            print(f"Warning: Task '{task_name_for_check}' not in TASKLIST during delivery reward check.")
+                                            self._add_reward("wrong_delivery", wrong_delivery_penalty)
+                                            interaction_occurred_this_agent = True; break
+                                    else: # Dish incorrect
+                                        print(f"DEBUG Step {self.step_count} Agent {idx}: Dish IS WRONG.")
+                                        self._add_reward("wrong_delivery", wrong_delivery_penalty)
+                                        # Refresh items
+                                        plate_to_reset = agent.holding; foods_on_plate = plate_to_reset.containing
+                                        agent.putdown(target_x, target_y); plate_to_reset.release(); plate_to_reset.refresh()
+                                        self.map[plate_to_reset.x][plate_to_reset.y] = ITEMIDX["plate"]
+                                        if foods_on_plate:
+                                            for f in foods_on_plate: f.refresh(); self.map[f.x][f.y] = ITEMIDX.get(f.rawName, ITEMIDX["counter"])
+                                        interaction_occurred_this_agent = True; break
+
+                                elif isinstance(held_item, Plate) and not (hasattr(held_item, 'containing') and held_item.containing):
+                                     print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot deliver empty plate.")
+                                     self._add_reward("wrong_delivery", wrong_delivery_penalty)
+                                     plate_to_reset = agent.holding; agent.putdown(target_x, target_y)
+                                     plate_to_reset.refresh(); self.map[plate_to_reset.x][plate_to_reset.y] = ITEMIDX["plate"]
+                                     interaction_occurred_this_agent = True; break
+                                else: # Cannot deliver this item type
+                                     print(f"DEBUG Step {self.step_count} Agent {idx}: Cannot deliver item {held_item}.")
+                                     self._add_reward("wrong_delivery", wrong_delivery_penalty)
+                                     item_to_reset = agent.holding; agent.putdown(target_x, target_y)
+                                     item_to_reset.refresh() # Assumes refresh method exists
+                                     # Try to put item icon back on map (might fail if pos occupied)
+                                     try:
+                                         if self.map[item_to_reset.x][item_to_reset.y] == ITEMIDX["counter"]:
+                                             self.map[item_to_reset.x][item_to_reset.y] = ITEMIDX.get(getattr(item_to_reset,'rawName',None), ITEMIDX["counter"])
+                                     except: pass # Ignore error if refresh fails map update
+                                     interaction_occurred_this_agent = True; break
+
+                    # If an interaction happened, break direction loop for this agent
+                    if interaction_occurred_this_agent:
+                        break
+
+                # If action was 4 but loop finished without break -> No interaction happened
+                if not interaction_occurred_this_agent:
+                     print(f"DEBUG Step {self.step_count} Agent {idx}: Interact action (4) had no valid target/effect.")
+
+        max_steps = 300 # Define max steps per episode
+        timed_out = self.step_count >= max_steps
+        # terminated: Task completed successfully
+        terminated = done
+        # truncated: Episode ended due to time limit, but not by task completion
+        truncated = timed_out and not terminated
+
+        terminateds = {agent_id: terminated for agent_id in self._agent_ids}
+        truncateds = {agent_id: truncated for agent_id in self._agent_ids}
+        terminateds["__all__"] = terminated
+        truncateds["__all__"] = truncated
+
+        if terminated: print(f"--- EPISODE TERMINATED (Task Complete) at Step {self.step_count} ---")
+        if truncated: print(f"--- EPISODE TRUNCATED (Timeout) at Step {self.step_count} ---")
+
+        # self.reward holds the base reward accumulated this step
+        final_rewards = {
+            agent_id: float(self.reward) * (self.human_multiplier if agent_id == "human" else 1.0)
+            for agent_id in self.agents
+        }
+        # Ensure floats
+        final_rewards = {k: float(v) for k, v in final_rewards.items()}
+        print(f"DEBUG Step {self.step_count} End: Base Step Reward={self.reward:.4f}, Multiplier={self.human_multiplier}, Final Step Rewards={final_rewards}")
+
+        next_obs = self._get_stacked_obs() if self.frame_stack_size > 1 else self._get_obs()
+
+        infos = {}
+        episode_end = terminateds["__all__"] or truncateds["__all__"]
+        for agent_id in self.agents:
+            agent_info = {}
+            # Add step-specific info (e.g., collisions)
+            agent_info.update(step_specific_info) # Add collisions etc.
+
+            if episode_end:
+                print(f"--- Logging Episode End Info for Agent {agent_id} ---")
+                # Add all tracked reward stats
+                for key, value in self.reward_stats.items():
+                     agent_info[f'episode_cumulative_{key}'] = value
+                # Add other summary info
+                agent_info['episode_human_multiplier'] = self.human_multiplier
+                agent_info['episode_role_type_str'] = str(self.episode_role_type)
+                agent_info['episode_length'] = self.step_count
+                agent_info['episode_task_complete'] = done # Task completion status
+
+            infos[agent_id] = agent_info
+
+        return next_obs, final_rewards, terminateds, truncateds, infos
 
 
     def render(self, mode='human'):
