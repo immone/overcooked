@@ -1,0 +1,30 @@
+Failure # 1 (occurred at 2025-06-01_16-03-10)
+The actor died because of an error raised in its creation task, [36mray::PPO.__init__()[39m (pid=26244, ip=127.0.0.1, actor_id=5a6564c6e35a0191799ca3f501000000, repr=PPO(env=Overcooked; env-runners=4; learners=0; multi-agent=True))
+  File "python\ray\_raylet.pyx", line 1879, in ray._raylet.execute_task
+  File "python\ray\_raylet.pyx", line 1820, in ray._raylet.execute_task.function_executor
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\_private\function_manager.py", line 696, in actor_method_executor
+    return method(__ray_actor, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\util\tracing\tracing_helper.py", line 467, in _resume_span
+    return method(self, *_args, **_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\rllib\algorithms\algorithm.py", line 585, in __init__
+    super().__init__(
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\tune\trainable\trainable.py", line 158, in __init__
+    self.setup(copy.deepcopy(self.config))
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\util\tracing\tracing_helper.py", line 467, in _resume_span
+    return method(self, *_args, **_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\rllib\algorithms\algorithm.py", line 822, in setup
+    rl_module_state = self.learner_group.get_state(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\rllib\core\learner\learner_group.py", line 743, in get_state
+    state[COMPONENT_LEARNER] = self._learner.get_state(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\rllib\core\learner\learner.py", line 1211, in get_state
+    state[COMPONENT_RL_MODULE] = self.module.get_state(
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\surya\Documents\AdvHCI_June\overcooked\AI4\Lib\site-packages\ray\rllib\core\rl_module\multi_rl_module.py", line 435, in get_state
+    state[module_id] = rl_module.get_state(
+                       ^^^^^^^^^^^^^^^^^^^^
+TypeError: AlwaysStationaryRLM.get_state() got an unexpected keyword argument 'not_components'
