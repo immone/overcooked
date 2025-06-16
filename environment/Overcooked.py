@@ -5,7 +5,6 @@ from .items import Tomato, Lettuce, Onion, Plate, Knife, Delivery, Agent, Food
 import copy
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from collections import Counter
-import random 
 
 DIRECTION = [(0, 1), (1, 0), (0, -1), (-1, 0)]
 ITEMNAME = ["space", "counter", "agent", "tomato", "lettuce", "plate", "knife", "delivery", "onion"]
@@ -310,13 +309,6 @@ class Overcooked_multi(MultiAgentEnv):
         self.itemDic = {name: [] for name in ITEMNAME if name != "space" and name != "counter"}
         agent_idx = 0
 
-        self.knife = []
-        self.delivery = []
-        self.tomato = []
-        self.lettuce = []
-        self.onion = []
-        self.plate = []
-
         for x in range(self.xlen):
             for y in range(self.ylen):
                 item_type = ITEMNAME[self.map[x][y]]
@@ -324,29 +316,17 @@ class Overcooked_multi(MultiAgentEnv):
                     self.itemDic[item_type].append(Agent(x, y, color=AGENTCOLOR[agent_idx]))
                     agent_idx += 1
                 elif item_type == "knife":
-                    new_knife = Knife(x, y)
-                    self.itemDic[item_type].append(new_knife)
-                    self.knife.append(new_knife)
+                    self.itemDic[item_type].append(Knife(x, y))
                 elif item_type == "delivery":
-                    new_delivery = Delivery(x, y)
-                    self.itemDic[item_type].append(new_delivery)
-                    self.delivery.append(new_delivery)
+                    self.itemDic[item_type].append(Delivery(x, y))
                 elif item_type == "tomato":
-                    new_tomato = Tomato(x, y)
-                    self.itemDic[item_type].append(new_tomato)
-                    self.tomato.append(new_tomato)
+                    self.itemDic[item_type].append(Tomato(x, y))
                 elif item_type == "lettuce":
-                    new_lettuce = Lettuce(x, y)
-                    self.itemDic[item_type].append(new_lettuce)
-                    self.lettuce.append(new_lettuce)
+                    self.itemDic[item_type].append(Lettuce(x, y))
                 elif item_type == "onion":
-                    new_onion = Onion(x, y)
-                    self.itemDic[item_type].append(new_onion)
-                    self.onion.append(new_onion)
+                    self.itemDic[item_type].append(Onion(x, y))
                 elif item_type == "plate":
-                    new_plate = Plate(x, y)
-                    self.itemDic[item_type].append(new_plate)
-                    self.plate.append(new_plate)
+                    self.itemDic[item_type].append(Plate(x, y))
 
         self.itemList = [item for sublist in self.itemDic.values() for item in sublist]
         self.agent = self.itemDic["agent"]
@@ -679,8 +659,6 @@ class Overcooked_multi(MultiAgentEnv):
 
         self._initObs()
 
-        # sample random human reward multiplier once per episode
-        self.human_multiplier = random.choice([1, -1])
         return self._get_obs(), {}
     
     def step(self, action):
@@ -782,13 +760,13 @@ class Overcooked_multi(MultiAgentEnv):
                                 # If the food is not chopped, chop it once
                                 else:
                                     knife.holding.chop()
-                                    self.reward += self.rewardList["subtask finished"]
+                                    self.reward += self.rewardList["goodtask finished"]
                                     # If the food is chopped after chopping, check if it is part of the current task
                                     if knife.holding.chopped:
                                         for task in self.task:
                                             if knife.holding.rawName in task:
                                                 # Reward for completing a mini task
-                                                self.reward += self.rewardList["subtask finished"]
+                                                self.reward += self.rewardList["minitask finished"]
                     # put down
                     # If the agent is currently holding something
                     elif agent.holding:
@@ -829,7 +807,7 @@ class Overcooked_multi(MultiAgentEnv):
                                         self.reward += self.rewardList["metatask failed"]
                                     else:
                                         # Reward for placing unchopped food on the knife
-                                        self.reward += self.rewardList["subtask finished"]
+                                        self.reward += self.rewardList["goodtask finished"]
                                 else:
                                     self.reward += self.rewardList["metatask failed"]
                             # If the knife is holding food and the agent is holding a plate, place the food on the plate
@@ -938,21 +916,11 @@ class Overcooked_multi(MultiAgentEnv):
                 if not agent.moved:
                     all_action_done = False
 
-       # terminateds = {"__all__": done or self.step_count >= 80}
-       # rewards = {agent: self.reward for agent in self.agents}
-       # infos = {agent: info for agent in self.agents}
-
-       # truncated =  False
-
-       # return self._get_obs(), rewards, terminateds, {'__all__': truncated}, infos
         terminateds = {"__all__": done or self.step_count >= 80}
         rewards = {agent: self.reward for agent in self.agents}
-
-        # Use the human multiplier sampled during reset
-        rewards["human"] *= self.human_multiplier
-
         infos = {agent: info for agent in self.agents}
-        truncated = False
+
+        truncated =  False
 
         return self._get_obs(), rewards, terminateds, {'__all__': truncated}, infos
 
